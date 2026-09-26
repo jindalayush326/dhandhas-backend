@@ -15,11 +15,34 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 30
     invitation_expire_days: int = 7
+    frontend_base_url: str = "http://localhost:3000"
     max_members_per_company: int = 10
+
+    # Login protection
     login_rate_limit_attempts: int = 10
     login_rate_limit_window_seconds: int = 60
+    max_failed_logins: int = 5
+    lockout_minutes: int = 15
     refresh_token_cleanup_days: int = 7
-    frontend_base_url: str = "http://localhost:3000"
+
+    # OTP (email verification / login 2FA)
+    otp_length: int = 6
+    otp_expire_minutes: int = 10
+    otp_max_attempts: int = 5
+    otp_resend_cooldown_seconds: int = 60
+    require_email_verification: bool = True
+
+    # Email delivery. Empty smtp_host => emails are logged, not sent
+    # (safe local-dev default; set real SMTP creds for production).
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = "no-reply@dhandas.app"
+    smtp_use_tls: bool = True
+
+    # DB safety
+    db_statement_timeout_ms: int = 15000
 
     # GST / HSN providers (swap via env only — see providers/factory.py)
     gst_provider: str = "gstinapi"

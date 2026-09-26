@@ -1,10 +1,12 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String
+from sqlalchemy import JSON, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.session import Base
 from app.models.mixins import SyncMixin
+
+VALID_ROLES = ("owner", "admin", "accountant", "employee", "viewer")
 
 
 class User(Base, SyncMixin):
@@ -17,6 +19,51 @@ class User(Base, SyncMixin):
     is_superuser: Mapped[bool] = mapped_column(Boolean, default=False)
     must_reset_password: Mapped[bool] = mapped_column(Boolean, default=False)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Email verification (OTP based)
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Brute-force protection
+    failed_login_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class OTPCode(Base, SyncMixin):
+    """Short-lived, hashed OTP for email verification / login 2FA.
+    Never store the raw 6-digit code — only its SHA-256 hash."""
+
+    __tablename__ = "otp_codes"
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    purpose: Mapped[str] = mapped_column(String(24))  # signup_verify|login_2fa|password_reset
+    code_hash: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+
+    __table_args__ = (
+        Index("ix_otp_codes_user_purpose", "user_id", "purpose"),
+    )
+
+
+class AuditLog(Base, SyncMixin):
+    """Append-only trail of security/business-relevant events. Never updated
+    or soft-deleted in practice — write-once. Kept generic (action + json
+    metadata) so every part of the app can log to one table instead of each
+    module inventing its own audit mechanism."""
+
+    __tablename__ = "audit_logs"
+
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id"), nullable=True, index=True)
+    action: Mapped[str] = mapped_column(String(64), index=True)
+    meta: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    ip_address: Mapped[str] = mapped_column(String(64), default="")
+    user_agent: Mapped[str] = mapped_column(String(255), default="")
+
+    __table_args__ = (
+        Index("ix_audit_logs_company_action", "company_id", "action"),
+    )
 
 
 class CompanyMember(Base, SyncMixin):
@@ -36,6 +83,7 @@ class CompanyMember(Base, SyncMixin):
         # Speeds up the two hottest queries: "does this user belong to this
         # company" (every request) and "list members of this company".
         Index("ix_company_members_company_user", "company_id", "user_id"),
+        CheckConstraint("role IN ('owner','admin','accountant','employee','viewer')", name="ck_company_members_role"),
     )
 
 
@@ -76,4 +124,5 @@ class Invitation(Base, SyncMixin):
 
     __table_args__ = (
         Index("ix_invitations_company_status", "company_id", "status"),
+        CheckConstraint("role IN ('admin','accountant','employee','viewer')", name="ck_invitations_role"),
     )

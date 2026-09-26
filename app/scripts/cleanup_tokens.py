@@ -7,6 +7,7 @@ to active sessions or pending invites still within their window.
 """
 import logging
 from datetime import timedelta
+
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.mixins import utcnow

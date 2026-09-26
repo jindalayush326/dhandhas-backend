@@ -1,6 +1,6 @@
 from datetime import datetime
-
-from pydantic import BaseModel, EmailStr, Field
+from typing import List, Optional
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
 
 from app.schemas.common import SyncFields
 
@@ -48,3 +48,25 @@ class MemberUpdate(BaseModel):
     role: str | None = None
     permissions: list[str] | None = None
     is_active: bool | None = None
+
+class CompanyAllocationItem(BaseModel):
+    company_id: int
+    legal_name: str
+    trade_name: Optional[str] = None
+    is_assigned: bool
+
+
+class BulkAssignCompaniesRequest(BaseModel):
+    user_id: int
+    company_ids: List[int]
+    role: str = "accountant"
+    permissions: Optional[List[str]] = None
+
+
+class StaffMemberOverview(BaseModel):
+    user_id: int
+    full_name: str
+    email: str
+    assigned_company_count: int
+
+    model_config = ConfigDict(from_attributes=True)

@@ -60,3 +60,16 @@ def refresh_token_expiry() -> datetime:
 
 def invite_token_expiry() -> datetime:
     return datetime.now(timezone.utc) + timedelta(days=settings.invitation_expire_days)
+
+
+def generate_otp(length: int = 6) -> str:
+    """Numeric OTP, generated with a CSPRNG (not `random`)."""
+    return "".join(str(secrets.randbelow(10)) for _ in range(length))
+
+
+def otp_expiry() -> datetime:
+    return datetime.now(timezone.utc) + timedelta(minutes=settings.otp_expire_minutes)
+
+
+def lockout_expiry() -> datetime:
+    return datetime.now(timezone.utc) + timedelta(minutes=settings.lockout_minutes)

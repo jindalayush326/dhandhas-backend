@@ -1,18 +1,39 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from app.core.config import settings
 
-_connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
-_pool_kwargs = {} if settings.database_url.startswith("sqlite") else {
-    "pool_size": settings.db_pool_size,
-    "max_overflow": settings.db_max_overflow,
-    "pool_recycle": 1800,  # recycle before typical cloud LB/DB idle-timeout kills the conn
-}
+_is_sqlite = settings.database_url.startswith("sqlite")
+_connect_args = {"check_same_thread": False} if _is_sqlite else {}
+
+_pool_kwargs = {} if _is_sqlite else {"pool_size": settings.db_pool_size, "max_overflow": settings.db_max_overflow}
 
 engine = create_engine(
-    settings.database_url, pool_pre_ping=True, future=True, connect_args=_connect_args, **_pool_kwargs
+    settings.database_url,
+    pool_pre_ping=True,   # ping each connection before use — required for
+                           # Neon/serverless Postgres, which silently closes
+                           # idle connections ("SSL connection has been
+                           # closed unexpectedly" otherwise).
+    pool_recycle=300,     # proactively recycle connections older than 5 min,
+                           # well under Neon's idle-close window.
+    connect_args=_connect_args,
+    future=True,
+    **_pool_kwargs,
 )
+
+if not _is_sqlite:
+    # Statement timeout must be set via `SET` on each new connection, not as
+    # a startup/connect_args parameter — poolers like Neon's PgBouncer and
+    # Supabase's pooler reject statement_timeout in the startup packet.
+    @event.listens_for(engine, "connect")
+    def _set_statement_timeout(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute(f"SET statement_timeout = {settings.db_statement_timeout_ms}")
+            dbapi_connection.commit()
+        finally:
+            cursor.close()
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 Base = declarative_base()
 

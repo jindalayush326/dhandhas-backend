@@ -8,6 +8,10 @@ api_router.include_router(auth.router)
 api_router.include_router(companies.router)
 api_router.include_router(members.router)
 api_router.include_router(members.public_router)
+
+# Mount the CA firm allocation router
+api_router.include_router(members.firm_router)
+
 for r in all_master_routers:
     api_router.include_router(r)
 api_router.include_router(vouchers.router)

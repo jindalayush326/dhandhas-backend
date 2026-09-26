@@ -13,20 +13,23 @@ down_revision = "0001"
 def upgrade():
     bind = op.get_bind()
     inspector = sa.inspect(bind)
+    existing_tables = set(inspector.get_table_names())
 
-    user_cols = {c["name"] for c in inspector.get_columns("users")}
-    if "must_reset_password" not in user_cols:
-        op.add_column("users", sa.Column("must_reset_password", sa.Boolean(), server_default=sa.false(), nullable=False))
-    if "last_login_at" not in user_cols:
-        op.add_column("users", sa.Column("last_login_at", sa.DateTime(timezone=True), nullable=True))
+    if "users" in existing_tables:
+        user_cols = {c["name"] for c in inspector.get_columns("users")}
+        if "must_reset_password" not in user_cols:
+            op.add_column("users", sa.Column("must_reset_password", sa.Boolean(), server_default=sa.false(), nullable=False))
+        if "last_login_at" not in user_cols:
+            op.add_column("users", sa.Column("last_login_at", sa.DateTime(timezone=True), nullable=True))
 
-    member_cols = {c["name"] for c in inspector.get_columns("company_members")}
-    if "permissions" not in member_cols:
-        op.add_column("company_members", sa.Column("permissions", sa.JSON(), nullable=True))
-    if "is_active" not in member_cols:
-        op.add_column("company_members", sa.Column("is_active", sa.Boolean(), server_default=sa.true(), nullable=False))
+    if "company_members" in existing_tables:
+        member_cols = {c["name"] for c in inspector.get_columns("company_members")}
+        if "permissions" not in member_cols:
+            op.add_column("company_members", sa.Column("permissions", sa.JSON(), nullable=True))
+        if "is_active" not in member_cols:
+            op.add_column("company_members", sa.Column("is_active", sa.Boolean(), server_default=sa.true(), nullable=False))
 
-    if "refresh_tokens" not in inspector.get_table_names():
+    if "refresh_tokens" not in existing_tables:
         op.create_table(
             "refresh_tokens",
             sa.Column("id", sa.BigInteger(), primary_key=True),
@@ -45,7 +48,7 @@ def upgrade():
             sa.Column("ip_address", sa.String(64), nullable=False, server_default=""),
         )
 
-    if "invitations" not in inspector.get_table_names():
+    if "invitations" not in existing_tables:
         op.create_table(
             "invitations",
             sa.Column("id", sa.BigInteger(), primary_key=True),

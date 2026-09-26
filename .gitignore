@@ -5,6 +5,7 @@ __pycache__/
 *.so
 .Python
 
+
 # Virtual environments
 venv/
 env/
@@ -52,3 +53,5 @@ dist/
 
 # Docker
 docker-compose.override.yml
+backend_dump.txt
+dump_backend.py

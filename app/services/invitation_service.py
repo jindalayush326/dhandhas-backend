@@ -11,11 +11,13 @@ from app.core.security import (
     hash_token,
     invite_token_expiry,
 )
+from app.models.core import Company
 from app.models.mixins import utcnow
 from app.models.user import CompanyMember, Invitation, User
+from app.services.audit_service import log_audit
+from app.services.email_service import send_invitation_email
 
 logger = logging.getLogger("dhandas.invitations")
-
 
 
 def create_invitation(
@@ -28,15 +30,15 @@ def create_invitation(
     permissions: list[str] | None = None,
     temp_password: str | None = None,
     expiry_days: int | None = None,
-    max_members: int = None,
+    max_members: int | None = None,
 ) -> tuple[Invitation, str, str]:
     """Creates (or reuses) the invited user's account with a temp password,
     links them to the company as a pending/active member, and returns
     (invitation, raw_invite_token, temp_password) — the raw token/password
     are shown to the inviter exactly once and never stored in clear text.
     """
-    max_members = max_members or settings.max_members_per_company
     email = email.strip().lower()
+    max_members = max_members or settings.max_members_per_company
 
     active_count = (
         db.query(CompanyMember)
@@ -97,6 +99,19 @@ def create_invitation(
         "invitation_created company_id=%s invited_by=%s email=%s role=%s",
         company_id, invited_by.id, email, role,
     )
+    log_audit(
+        db, "invitation_created", user_id=invited_by.id, company_id=company_id,
+        meta={"invited_email": email, "role": role},
+    )
+
+    company = db.query(Company).filter(Company.id == company_id).first()
+    try:
+        send_invitation_email(
+            email, invite_link(raw_token), temp_password, company.name if company else "Dhandas", role,
+        )
+    except Exception:
+        logger.exception("invitation_email_failed email=%s", email)  # invite still created; link/password returned in API response
+
     return invitation, raw_token, temp_password
 
 
@@ -137,10 +152,12 @@ def accept_invitation(db: Session, raw_token: str, new_password: str) -> User:
     db.commit()
     db.refresh(user)
     logger.info("invitation_accepted invitation_id=%s user_id=%s", invitation.id, user.id)
+    log_audit(db, "invitation_accepted", user_id=user.id, company_id=invitation.company_id,
+              meta={"invitation_id": invitation.id})
     return user
 
 
-def revoke_invitation(db: Session, company_id: int, invitation_id: int) -> None:
+def revoke_invitation(db: Session, company_id: int, invitation_id: int, revoked_by: User | None = None) -> None:
     invitation = (
         db.query(Invitation)
         .filter(Invitation.id == invitation_id, Invitation.company_id == company_id)
@@ -151,6 +168,8 @@ def revoke_invitation(db: Session, company_id: int, invitation_id: int) -> None:
     invitation.status = "revoked"
     db.add(invitation)
     db.commit()
+    log_audit(db, "invitation_revoked", user_id=revoked_by.id if revoked_by else None, company_id=company_id,
+              meta={"invitation_id": invitation_id})
 
 
 def list_invitations(db: Session, company_id: int) -> list[Invitation]:

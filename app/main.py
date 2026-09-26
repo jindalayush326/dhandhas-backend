@@ -4,6 +4,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from jose.exceptions import JWTError
+from sqlalchemy import text as sa_text
 
 from app.api.v1.router import api_router
 from app.core.config import settings
@@ -68,4 +69,13 @@ async def unhandled_error_handler(request: Request, exc: Exception) -> JSONRespo
 
 @app.get("/health", tags=["Health"])
 async def health() -> dict:
-    return {"status": "ok"}
+    """Liveness/readiness probe. Verifies the DB is actually reachable, not
+    just that the process is alive — an orchestrator should restart/avoid
+    routing to an instance whose DB connection is dead."""
+    try:
+        with engine.connect() as conn:
+            conn.execute(sa_text("SELECT 1"))
+        return {"status": "ok", "db": "ok"}
+    except Exception as exc:
+        logger.error("health_check_db_failed: %s", exc)
+        return JSONResponse(status_code=503, content={"status": "degraded", "db": "unreachable"})
