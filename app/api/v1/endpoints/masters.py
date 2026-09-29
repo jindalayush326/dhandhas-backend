@@ -81,7 +81,12 @@ voucher_types_router = build_master_router(
     core_models.VoucherType, core_schemas.VoucherTypeCreate, core_schemas.VoucherTypeRead,
     "/voucher-types", "Voucher Types",
 )
+financial_years_router = build_master_router(
+    core_models.FinancialYear, core_schemas.FinancialYearCreate, core_schemas.FinancialYearRead,
+    "/financial-years", "Financial Years",
+)
 
 all_master_routers = [
     account_groups_router, accounts_router, godowns_router, items_router, voucher_types_router,
+    financial_years_router,
 ]

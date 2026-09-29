@@ -96,3 +96,19 @@ class VoucherTypeRead(SyncFields):
     name: str
     nature: str
     abbreviation: str
+
+
+class FinancialYearCreate(BaseModel):
+    company_id: int
+    name: str
+    start_date: datetime
+    end_date: datetime
+    is_active: bool = True
+
+
+class FinancialYearRead(SyncFields):
+    company_id: int
+    name: str
+    start_date: datetime
+    end_date: datetime
+    is_active: bool

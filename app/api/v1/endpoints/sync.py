@@ -16,6 +16,7 @@ router = APIRouter(prefix="/sync", tags=["Sync"])
 # table name -> ORM model. Add new syncable tables here only (DRY).
 _TABLE_MODELS = {
     "companies": core.Company,
+    "financial_years": core.FinancialYear,
     "account_groups": core.AccountGroup,
     "accounts": core.Account,
     "items": core.Item,
@@ -29,15 +30,17 @@ _TABLE_MODELS = {
 
 # Columns that MUST be Decimal, never float — a client (mobile app, JS,
 # whatever) will send these as JSON numbers, and JSON has no decimal type.
-# Coerce via str() first so e.g. 19.99 (a float) doesn't pick up binary
-# floating-point error (19.990000000000002) before it ever touches money.
-_DECIMAL_COLUMNS = {"amount", "rate", "qty", "opening_balance", "opening_qty", "opening_rate", "gst_rate", "qty_in", "qty_out"}
+_DECIMAL_COLUMNS = {
+    "amount", "rate", "qty", "opening_balance", "opening_qty", "opening_rate",
+    "gst_rate", "qty_in", "qty_out",
+}
 
 # FK column -> model it points to. Internal `*_id` values are per-database
 # (autoincrement) and meaningless across devices, so pull/push translate
 # them to/from the stable `uuid` instead.
 _FK_MAP = {
     "company_id": core.Company,
+    "financial_year_id": core.FinancialYear,
     "group_id": core.AccountGroup,
     "parent_id": core.AccountGroup,
     "party_id": core.Account,
@@ -76,10 +79,24 @@ def _coerce_decimals(payload: dict) -> dict:
     return payload
 
 
+def _json_safe(payload: dict) -> dict:
+    """For storing a row snapshot in sync_changes.payload (a JSON column) —
+    Decimal/datetime aren't JSON-serializable as-is."""
+    out = {}
+    for k, v in payload.items():
+        if isinstance(v, Decimal):
+            out[k] = str(v)
+        elif isinstance(v, datetime):
+            out[k] = v.isoformat()
+        else:
+            out[k] = v
+    return out
+
+
 def _validate_voucher_balance(db: Session, voucher_id: int) -> None:
     """Sync bypasses accounting_engine.save_voucher, so the dr==cr invariant
-    has to be re-checked here — otherwise a buggy/malicious client could
-    push an unbalanced ledger straight into the database."""
+    has to be re-checked here, EXACTLY (no tolerance) — otherwise a buggy or
+    malicious client could push an unbalanced ledger straight into the DB."""
     rows = (
         db.query(transactions.VoucherEntry.dr_cr, transactions.VoucherEntry.amount)
         .filter(transactions.VoucherEntry.voucher_id == voucher_id, transactions.VoucherEntry.deleted_at.is_(None))
@@ -89,7 +106,7 @@ def _validate_voucher_balance(db: Session, voucher_id: int) -> None:
         return
     dr = sum((r.amount for r in rows if r.dr_cr == "dr"), Decimal("0"))
     cr = sum((r.amount for r in rows if r.dr_cr == "cr"), Decimal("0"))
-    if abs(dr - cr) > Decimal("0.01"):
+    if dr != cr:
         raise UnbalancedVoucherError(f"Unbalanced voucher {voucher_id} after sync: dr={dr} cr={cr}")
 
 
@@ -97,14 +114,35 @@ def _validate_voucher_balance(db: Session, voucher_id: int) -> None:
 async def push(
     req: PushRequest, company_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)
 ):
-    """Apply client changes as ONE atomic transaction (all-or-nothing) —
-    partial application of a sync batch is worse than rejecting all of it,
-    since it can leave cross-table invariants (like a voucher's dr==cr)
-    broken. Conflict rule: last-write-wins on updated_at. FK values arrive
-    as `*_uuid` and are resolved to this server's own `*_id` before writing.
-    On success, broadcasts a lightweight ping over /sync/ws/{company_id} so
-    other connected terminals pull immediately."""
-    require_company_access(company_id, db, user)
+    """Apply client changes as ONE atomic transaction (all-or-nothing).
+
+    Idempotent: `operation_id` is checked against `sync_operations` first —
+    if this exact push already succeeded (e.g. the client's first attempt
+    timed out waiting for a response but the server had already committed,
+    and the app retried), the stored result is returned unchanged and
+    NOTHING is re-applied. This is what prevents duplicate vouchers after a
+    flaky network retries a push that actually already landed.
+
+    Every applied row also gets an entry in `sync_changes` (the server's
+    authoritative, sequence-ordered change log) in the SAME transaction —
+    so other devices can reliably pull "everything after sequence N"
+    instead of relying on updated_at, which can silently miss rows that
+    share a timestamp.
+
+    Tenant check: company_id is taken from the authenticated user's
+    membership (require_company_access), never trusted bare from the
+    request — a device cannot push into a company it doesn't belong to
+    merely by putting a different company_id in the URL."""
+    require_company_access(company_id, db, user, "sync:use")
+
+    existing_op = (
+        db.query(transactions.SyncOperation)
+        .filter(transactions.SyncOperation.operation_id == req.operation_id, transactions.SyncOperation.company_id == company_id)
+        .first()
+    )
+    if existing_op:
+        return existing_op.result
+
     applied, skipped = 0, 0
     touched_voucher_ids: set[int] = set()
 
@@ -125,55 +163,102 @@ async def push(
             payload = {k: v for k, v in payload.items() if hasattr(model, k) and k != "id"}
             payload = _coerce_decimals(payload)
 
+            op_name = "delete" if change.op == "delete" else ("update" if existing else "create")
+
             if change.op == "delete":
                 if existing:
                     existing.deleted_at = datetime.now(timezone.utc)
                 applied += 1
-                continue
-
-            if existing:
+            elif existing:
                 incoming_updated = payload.get("updated_at")
                 if incoming_updated and existing.updated_at and str(existing.updated_at) >= str(incoming_updated):
                     skipped += 1
                     continue
                 for k, v in payload.items():
                     setattr(existing, k, v)
+                applied += 1
                 target = existing
             else:
                 target = model(**payload)
                 db.add(target)
-            applied += 1
+                applied += 1
 
-            if change.table == "voucher_entries":
-                db.flush()  # need target.voucher_id resolved before we can check balance
-                touched_voucher_ids.add(target.voucher_id)
-            elif change.table == "vouchers":
-                db.flush()
-                touched_voucher_ids.add(target.id)
+            if change.op != "delete":
+                db.flush()  # need target.id/company_id resolved for balance check + change-log below
+                if change.table == "voucher_entries":
+                    touched_voucher_ids.add(target.voucher_id)
+                elif change.table == "vouchers":
+                    touched_voucher_ids.add(target.id)
+
+            db.add(transactions.SyncChange(
+                company_id=company_id, entity_type=change.table, entity_id=change.uuid,
+                operation=op_name, payload=_json_safe(payload), changed_at=datetime.now(timezone.utc),
+                device_id=req.device_id,
+            ))
 
         db.flush()
         for vid in touched_voucher_ids:
             _validate_voucher_balance(db, vid)
 
+        result = {"applied": applied, "skipped": skipped}
+        db.add(transactions.SyncOperation(
+            operation_id=req.operation_id, company_id=company_id, device_id=req.device_id, result=result,
+        ))
         db.commit()
     except Exception:
         db.rollback()
         raise
 
     await manager.broadcast(company_id, {"type": "SYNC_CHANGED", "tables": list({c.table for c in req.changes})})
-    return {"applied": applied, "skipped": skipped}
+    return result
 
 
 @router.get("/pull")
 def pull(
+    company_id: int = Query(...),
+    cursor: int = Query(0, ge=0, description="Last sequence (sync_changes.id) this device has already applied"),
+    limit: int = Query(500, ge=1, le=2000),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Cursor-based pull — the reliable replacement for `updated_at >
+    timestamp` polling. Returns every change with sequence > cursor, in
+    order, gap-free (sequence is the row's own auto-increment id, which
+    Postgres guarantees is strictly increasing per insert). The client
+    replays them in order and remembers `next_cursor` for its next pull —
+    it will never miss a row, even if many changes landed in the same
+    millisecond (a real failure mode of timestamp-based sync)."""
+    require_company_access(company_id, db, user)
+    rows = (
+        db.query(transactions.SyncChange)
+        .filter(transactions.SyncChange.company_id == company_id, transactions.SyncChange.id > cursor)
+        .order_by(transactions.SyncChange.id.asc())
+        .limit(limit)
+        .all()
+    )
+    changes = [
+        {
+            "sequence": r.id, "entity_type": r.entity_type, "entity_id": r.entity_id,
+            "operation": r.operation, "payload": r.payload, "changed_at": r.changed_at.isoformat(),
+            "device_id": r.device_id,
+        }
+        for r in rows
+    ]
+    next_cursor = rows[-1].id if rows else cursor
+    return {"changes": changes, "next_cursor": next_cursor, "has_more": len(rows) == limit}
+
+
+@router.get("/pull-table", deprecated=True)
+def pull_table(
     table: str = Query(...),
     since: str = Query(...),
     company_id: int = Query(...),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Returns rows changed since [since], with every `*_id` FK replaced by
-    the matching `*_uuid` so the client can resolve it to its own local id."""
+    """Legacy timestamp-based pull — kept only for backward compatibility
+    with clients not yet migrated to the cursor-based GET /sync/pull above.
+    New integrations should use /sync/pull, not this."""
     require_company_access(company_id, db, user)
     model = _TABLE_MODELS.get(table)
     if not model:

@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from sqlalchemy import JSON, Boolean, CheckConstraint, DateTime, ForeignKey, Numeric, String
+from sqlalchemy import JSON, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Numeric, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.session import Base
@@ -32,6 +32,7 @@ class Account(Base, SyncMixin):
     __table_args__ = (
         CheckConstraint("opening_balance_type IN ('dr','cr')", name="ck_accounts_ob_type"),
         CheckConstraint("opening_balance >= 0", name="ck_accounts_ob_nonneg"),
+        Index("ix_accounts_company_name", "company_id", "name"),
     )
 
     company_id: Mapped[int] = mapped_column(ForeignKey("companies.id"), index=True)
@@ -53,6 +54,7 @@ class Godown(Base, SyncMixin):
 
 class Item(Base, SyncMixin):
     __tablename__ = "items"
+    __table_args__ = (Index("ix_items_company_name", "company_id", "name"),)
 
     company_id: Mapped[int] = mapped_column(ForeignKey("companies.id"), index=True)
     name: Mapped[str] = mapped_column(String(255))
@@ -61,6 +63,24 @@ class Item(Base, SyncMixin):
     gst_rate: Mapped[Decimal] = mapped_column(Numeric(5, 2), default=Decimal("0"))
     opening_qty: Mapped[Decimal] = mapped_column(Numeric(18, 3), default=Decimal("0"))
     opening_rate: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+
+
+class FinancialYear(Base, SyncMixin):
+    """A company's accounting year (e.g. Apr-2024 to Mar-2025). Every voucher
+    belongs to exactly one — this is what lets you close a year, run
+    year-locked reports, and carry forward opening balances correctly,
+    instead of inferring the year from voucher_date alone."""
+
+    __tablename__ = "financial_years"
+    __table_args__ = (
+        UniqueConstraint("company_id", "name", name="uq_financial_years_company_name"),
+    )
+
+    company_id: Mapped[int] = mapped_column(ForeignKey("companies.id"), index=True)
+    name: Mapped[str] = mapped_column(String(32))  # e.g. "FY2024-25"
+    start_date: Mapped[object] = mapped_column(DateTime(timezone=True))
+    end_date: Mapped[object] = mapped_column(DateTime(timezone=True))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)  # False once the year is closed/locked
 
 
 class VoucherType(Base, SyncMixin):

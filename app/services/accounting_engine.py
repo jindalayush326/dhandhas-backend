@@ -9,8 +9,33 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.db_transaction import db_transaction
-from app.core.exceptions import NotFoundError, UnbalancedVoucherError
+from app.core.exceptions import NotFoundError, UnbalancedVoucherError, ValidationError
+from app.models.core import FinancialYear
 from app.models.transactions import Voucher, VoucherEntry
+
+
+def resolve_financial_year(db: Session, company_id: int, voucher_date: datetime) -> FinancialYear:
+    """Finds the FinancialYear a voucher_date falls in. Never guesses/creates
+    one implicitly — an unmapped date is a real data problem (missing FY
+    setup, or a voucher dated outside any configured year) and should fail
+    loudly rather than silently post into the wrong year."""
+    fy = (
+        db.query(FinancialYear)
+        .filter(
+            FinancialYear.company_id == company_id,
+            FinancialYear.start_date <= voucher_date,
+            FinancialYear.end_date >= voucher_date,
+            FinancialYear.deleted_at.is_(None),
+        )
+        .first()
+    )
+    if not fy:
+        raise ValidationError(
+            f"No financial year configured for {company_id} covering {voucher_date.date()} — create one first"
+        )
+    if not fy.is_active:
+        raise ValidationError(f"Financial year '{fy.name}' is closed — cannot post vouchers into it")
+    return fy
 
 
 def save_voucher(
@@ -24,20 +49,30 @@ def save_voucher(
     narration: str | None,
     reference_number: str | None,
     lines: list[dict],
+    financial_year_id: int | None = None,
 ) -> Voucher:
     """lines: [{account_id, dr_cr, amount, item_id?, godown_id?, qty?, rate?}]
-    Rejects any voucher where debits and credits don't balance — the one
-    invariant the whole ledger depends on. Voucher header + every entry line
-    are written as a single atomic transaction: either the whole voucher
-    lands, or none of it does."""
+    Rejects any voucher where debits and credits don't balance EXACTLY —
+    zero tolerance, not even a 1-paisa rounding slack, because silently
+    absorbing a mismatch is exactly how a ledger goes quietly wrong over
+    thousands of vouchers. Voucher header + every entry line are written as
+    a single atomic transaction: either the whole voucher lands, or none of
+    it does. `financial_year_id` is auto-resolved from voucher_date if not
+    given explicitly (e.g. by an import that doesn't know FY ids)."""
     dr = sum((Decimal(str(l["amount"])) for l in lines if l["dr_cr"] == "dr"), Decimal("0"))
     cr = sum((Decimal(str(l["amount"])) for l in lines if l["dr_cr"] == "cr"), Decimal("0"))
-    if abs(dr - cr) > Decimal("0.01"):
-        raise UnbalancedVoucherError(f"Unbalanced voucher: dr={dr} cr={cr}")
+    if dr != cr:
+        raise UnbalancedVoucherError(f"Unbalanced voucher: dr={dr} cr={cr} (difference={dr - cr})")
+    if dr == 0:
+        raise UnbalancedVoucherError("Voucher has no value — dr and cr both zero")
+
+    if financial_year_id is None:
+        financial_year_id = resolve_financial_year(db, company_id, voucher_date).id
 
     with db_transaction(db):
         voucher = Voucher(
             company_id=company_id,
+            financial_year_id=financial_year_id,
             voucher_type_id=voucher_type_id,
             voucher_number=voucher_number,
             voucher_date=voucher_date,

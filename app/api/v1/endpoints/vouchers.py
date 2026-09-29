@@ -23,6 +23,7 @@ def create_voucher(payload: VoucherCreate, db: Session = Depends(get_db), user: 
         party_id=payload.party_id,
         narration=payload.narration,
         reference_number=payload.reference_number,
+        financial_year_id=payload.financial_year_id,
         lines=[e.model_dump() for e in payload.entries],
     )
     return voucher
