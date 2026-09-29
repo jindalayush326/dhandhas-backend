@@ -25,6 +25,7 @@ class VoucherCreate(BaseModel):
     party_id: int | None = None
     narration: str | None = None
     reference_number: str | None = None
+    financial_year_id: int | None = None  # auto-resolved from voucher_date if omitted
     entries: list[VoucherEntryIn]
 
 
@@ -40,6 +41,7 @@ class VoucherEntryRead(SyncFields):
 
 class VoucherRead(SyncFields):
     company_id: int
+    financial_year_id: int
     voucher_type_id: int
     voucher_number: str
     voucher_date: datetime
