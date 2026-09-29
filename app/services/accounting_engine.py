@@ -8,6 +8,7 @@ from decimal import Decimal
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.core.db_transaction import db_transaction
 from app.core.exceptions import NotFoundError, UnbalancedVoucherError
 from app.models.transactions import Voucher, VoucherEntry
 
@@ -26,26 +27,28 @@ def save_voucher(
 ) -> Voucher:
     """lines: [{account_id, dr_cr, amount, item_id?, godown_id?, qty?, rate?}]
     Rejects any voucher where debits and credits don't balance — the one
-    invariant the whole ledger depends on."""
+    invariant the whole ledger depends on. Voucher header + every entry line
+    are written as a single atomic transaction: either the whole voucher
+    lands, or none of it does."""
     dr = sum((Decimal(str(l["amount"])) for l in lines if l["dr_cr"] == "dr"), Decimal("0"))
     cr = sum((Decimal(str(l["amount"])) for l in lines if l["dr_cr"] == "cr"), Decimal("0"))
     if abs(dr - cr) > Decimal("0.01"):
         raise UnbalancedVoucherError(f"Unbalanced voucher: dr={dr} cr={cr}")
 
-    voucher = Voucher(
-        company_id=company_id,
-        voucher_type_id=voucher_type_id,
-        voucher_number=voucher_number,
-        voucher_date=voucher_date,
-        party_id=party_id,
-        narration=narration,
-        reference_number=reference_number,
-    )
-    db.add(voucher)
-    db.flush()  # assign voucher.id for the entries below
-    for l in lines:
-        db.add(VoucherEntry(voucher_id=voucher.id, **l))
-    db.commit()
+    with db_transaction(db):
+        voucher = Voucher(
+            company_id=company_id,
+            voucher_type_id=voucher_type_id,
+            voucher_number=voucher_number,
+            voucher_date=voucher_date,
+            party_id=party_id,
+            narration=narration,
+            reference_number=reference_number,
+        )
+        db.add(voucher)
+        db.flush()  # assign voucher.id for the entries below
+        for l in lines:
+            db.add(VoucherEntry(voucher_id=voucher.id, **l))
     db.refresh(voucher)
     return voucher
 
@@ -58,8 +61,8 @@ def cancel_voucher(db: Session, company_id: int, voucher_id: int) -> None:
     )
     if not voucher:
         raise NotFoundError(f"Voucher {voucher_id} not found")
-    voucher.is_cancelled = True
-    db.commit()
+    with db_transaction(db):
+        voucher.is_cancelled = True
 
 
 _TB_SQL = """

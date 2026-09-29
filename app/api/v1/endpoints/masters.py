@@ -1,7 +1,7 @@
 """One CRUD router factory reused for every master (account groups, accounts,
 items, godowns, voucher types) instead of five near-identical route files."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -19,10 +19,14 @@ def build_master_router(
 
     @router.get("", response_model=list[read_schema])
     def list_items(
-        company_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+        company_id: int,
+        skip: int = Query(0, ge=0),
+        limit: int = Query(100, ge=1, le=500),
+        db: Session = Depends(get_db),
+        user: User = Depends(get_current_user),
     ):
         require_company_access(company_id, db, user, "masters:read")
-        return Repository(db, model).list(company_id=company_id)
+        return Repository(db, model).list(company_id=company_id, skip=skip, limit=limit)
 
     @router.post("", response_model=read_schema, status_code=201)
     def create_item(
@@ -43,11 +47,12 @@ def build_master_router(
         item_id: int,
         company_id: int,
         payload: create_schema,
+        expected_version: int | None = Query(None, description="Pass the version you last read to detect concurrent edits"),
         db: Session = Depends(get_db),
         user: User = Depends(get_current_user),
     ):
         require_company_access(company_id, db, user, "masters:write")
-        return Repository(db, model).update(item_id, payload.model_dump(), company_id)
+        return Repository(db, model).update(item_id, payload.model_dump(), company_id, expected_version)
 
     @router.delete("/{item_id}", status_code=204)
     def delete_item(

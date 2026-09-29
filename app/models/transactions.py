@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Numeric, String, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Numeric, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.session import Base
@@ -9,7 +9,10 @@ from app.models.mixins import SyncMixin
 
 class Voucher(Base, SyncMixin):
     __tablename__ = "vouchers"
-    __table_args__ = (UniqueConstraint("company_id", "voucher_type_id", "voucher_number"),)
+    __table_args__ = (
+        UniqueConstraint("company_id", "voucher_type_id", "voucher_number"),
+        Index("ix_vouchers_company_date", "company_id", "voucher_date"),  # every report query filters by both
+    )
 
     company_id: Mapped[int] = mapped_column(ForeignKey("companies.id"), index=True)
     voucher_type_id: Mapped[int] = mapped_column(ForeignKey("voucher_types.id"), index=True)
@@ -41,6 +44,11 @@ class VoucherEntry(Base, SyncMixin):
     godown_id: Mapped[int | None] = mapped_column(ForeignKey("godowns.id"), nullable=True)
     qty: Mapped[Decimal | None] = mapped_column(Numeric(18, 3), nullable=True)
     rate: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("dr_cr IN ('dr','cr')", name="ck_voucher_entries_dr_cr"),
+        CheckConstraint("amount >= 0", name="ck_voucher_entries_amount_nonneg"),
+    )
 
 
 class GstTaxLine(Base, SyncMixin):

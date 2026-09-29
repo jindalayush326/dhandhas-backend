@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Numeric, String
+from sqlalchemy import JSON, Boolean, CheckConstraint, DateTime, ForeignKey, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.session import Base
@@ -29,6 +29,10 @@ class AccountGroup(Base, SyncMixin):
 
 class Account(Base, SyncMixin):
     __tablename__ = "accounts"
+    __table_args__ = (
+        CheckConstraint("opening_balance_type IN ('dr','cr')", name="ck_accounts_ob_type"),
+        CheckConstraint("opening_balance >= 0", name="ck_accounts_ob_nonneg"),
+    )
 
     company_id: Mapped[int] = mapped_column(ForeignKey("companies.id"), index=True)
     group_id: Mapped[int] = mapped_column(ForeignKey("account_groups.id"), index=True)
