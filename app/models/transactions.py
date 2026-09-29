@@ -29,6 +29,7 @@ class Voucher(Base, SyncMixin):
     irn: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
     ack_no: Mapped[str | None] = mapped_column(String(50), nullable=True)
     signed_qr_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    meta_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # client UI extras (line items etc.)
 
 
 class VoucherEntry(Base, SyncMixin):

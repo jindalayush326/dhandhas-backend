@@ -12,7 +12,7 @@ router = APIRouter(prefix="/einvoice", tags=["e-Invoice"])
 
 @router.post("/serialize")
 def convert_to_einvoice(
-    voucher_id: int, company_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+    company_id: int, voucher_id: int | None = None, voucher_uuid: str | None = None, db: Session = Depends(get_db), user: User = Depends(get_current_user)
 ):
     """Builds the standard GST INV-01 JSON for a voucher. Submitting it to
     the IRP (NIC/GSP) and storing the returned IRN/QR back on the voucher is
@@ -24,13 +24,11 @@ def convert_to_einvoice(
     all and would happily serialize whatever the caller typed in, for any
     company."""
     require_company_access(company_id, db, user, "gst:use")
-    voucher = (
-        db.query(Voucher)
-        .filter(Voucher.id == voucher_id, Voucher.company_id == company_id, Voucher.deleted_at.is_(None))
-        .first()
-    )
+    q = db.query(Voucher).filter(Voucher.company_id == company_id, Voucher.deleted_at.is_(None))
+    q = q.filter(Voucher.uuid == voucher_uuid) if voucher_uuid else q.filter(Voucher.id == voucher_id)
+    voucher = q.first()
     if not voucher:
-        raise ValidationError(f"Voucher {voucher_id} not found in company {company_id}")
+        raise ValidationError(f"Voucher {voucher_uuid or voucher_id} not found in company {company_id}")
 
     voucher_dict = {c.name: getattr(voucher, c.name) for c in voucher.__table__.columns}
     return serialize_to_inv01(voucher_dict, {"company_id": company_id})

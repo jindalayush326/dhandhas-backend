@@ -63,6 +63,7 @@ class Item(Base, SyncMixin):
     gst_rate: Mapped[Decimal] = mapped_column(Numeric(5, 2), default=Decimal("0"))
     opening_qty: Mapped[Decimal] = mapped_column(Numeric(18, 3), default=Decimal("0"))
     opening_rate: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
+    meta_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class FinancialYear(Base, SyncMixin):
@@ -90,3 +91,4 @@ class VoucherType(Base, SyncMixin):
     name: Mapped[str] = mapped_column(String(64))
     nature: Mapped[str] = mapped_column(String(32))
     abbreviation: Mapped[str] = mapped_column(String(8), default="")
+

@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_user, get_db, require_company_access
-from app.core.exceptions import UnbalancedVoucherError
+from app.core.exceptions import ForbiddenError, UnbalancedVoucherError
 from app.models import core, transactions
 from app.models.user import User
 from app.schemas.sync import PushRequest
@@ -63,11 +63,19 @@ def _uuid_of(db: Session, model, pk: int | None) -> str | None:
 def _id_of(db: Session, model, uuid_val: str | None) -> int | None:
     if uuid_val is None:
         return None
-    row = db.query(model.id).filter(model.uuid == uuid_val).first()
-    if not row:
-        raise ValueError(f"Sync order error: {model.__tablename__} {uuid_val} not found on server")
-    return row[0]
 
+    row = db.query(model.id).filter(
+        model.uuid == uuid_val
+    ).first()
+
+    if not row:
+        raise ValueError(
+            f"Sync order error: "
+            f"{model.__tablename__} "
+            f"{uuid_val} not found on server"
+        )
+
+    return row[0]
 
 def _coerce_decimals(payload: dict) -> dict:
     for col in _DECIMAL_COLUMNS:
@@ -77,6 +85,28 @@ def _coerce_decimals(payload: dict) -> dict:
             except (InvalidOperation, ValueError):
                 raise ValueError(f"Invalid numeric value for {col}: {payload[col]!r}")
     return payload
+
+
+def _parse_dt(v):
+    if not isinstance(v, str):
+        return v
+    dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _coerce_datetimes(payload: dict) -> dict:
+    """Clients send ISO strings; ORM DateTime columns need datetime objects."""
+    for k, v in list(payload.items()):
+        if v is not None and (k.endswith("_date") or k.endswith("_at") or k == "fy_start"):
+            try:
+                payload[k] = _parse_dt(v)
+            except ValueError:
+                raise ValueError(f"Invalid datetime for {k}: {v!r}")
+    return payload
+
+
+def _aware(dt):
+    return dt if dt is None or dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def _json_safe(payload: dict) -> dict:
@@ -149,11 +179,15 @@ async def push(
     try:
         for change in req.changes:
             model = _TABLE_MODELS.get(change.table)
-            if not model:
+            if not model or change.table == "companies":  # company is created via POST /companies
                 skipped += 1
                 continue
             existing = db.query(model).filter(model.uuid == change.uuid).first()
-            payload = dict(change.payload)
+            if existing is not None and hasattr(existing, "company_id") and existing.company_id != company_id:
+                raise ForbiddenError("Entity belongs to a different company")
+            raw = dict(change.payload)  # what the client sent (uuid-keyed) — this is what pull replays
+            payload = dict(raw)
+            payload.pop("company_uuid", None)
 
             for fk_col, fk_model in _FK_MAP.items():
                 uuid_key = fk_col.replace("_id", "_uuid")
@@ -161,7 +195,9 @@ async def push(
                     payload[fk_col] = _id_of(db, fk_model, payload.pop(uuid_key))
 
             payload = {k: v for k, v in payload.items() if hasattr(model, k) and k != "id"}
-            payload = _coerce_decimals(payload)
+            if hasattr(model, "company_id"):
+                payload["company_id"] = company_id  # tenant comes from the URL/membership, never the client
+            payload = _coerce_datetimes(_coerce_decimals(payload))
 
             op_name = "delete" if change.op == "delete" else ("update" if existing else "create")
 
@@ -171,7 +207,7 @@ async def push(
                 applied += 1
             elif existing:
                 incoming_updated = payload.get("updated_at")
-                if incoming_updated and existing.updated_at and str(existing.updated_at) >= str(incoming_updated):
+                if incoming_updated and existing.updated_at and _aware(existing.updated_at) >= _aware(incoming_updated):
                     skipped += 1
                     continue
                 for k, v in payload.items():
@@ -192,7 +228,7 @@ async def push(
 
             db.add(transactions.SyncChange(
                 company_id=company_id, entity_type=change.table, entity_id=change.uuid,
-                operation=op_name, payload=_json_safe(payload), changed_at=datetime.now(timezone.utc),
+                operation=op_name, payload=_json_safe(raw), changed_at=datetime.now(timezone.utc),
                 device_id=req.device_id,
             ))
 

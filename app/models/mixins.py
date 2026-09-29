@@ -17,7 +17,7 @@ class SyncMixin:
     every client key off — never the internal id, which differs per device.
     """
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
     uuid: Mapped[str] = mapped_column(String(36), unique=True, index=True, default=lambda: str(uuid_lib.uuid4()))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, index=True)
