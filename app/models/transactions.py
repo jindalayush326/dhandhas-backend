@@ -10,7 +10,7 @@ from app.models.mixins import SyncMixin
 class Voucher(Base, SyncMixin):
     __tablename__ = "vouchers"
     __table_args__ = (
-        UniqueConstraint("company_id", "voucher_type_id", "voucher_number"),
+        Index("ix_vouchers_company_type_number", "company_id", "voucher_type_id", "voucher_number"),
         Index("ix_vouchers_company_fy_date", "company_id", "financial_year_id", "voucher_date"),
         Index("ix_vouchers_company_type_date", "company_id", "voucher_type_id", "voucher_date"),
     )

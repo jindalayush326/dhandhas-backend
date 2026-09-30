@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_current_user, get_db, require_company_access
@@ -140,6 +142,36 @@ def _validate_voucher_balance(db: Session, voucher_id: int) -> None:
         raise UnbalancedVoucherError(f"Unbalanced voucher {voucher_id} after sync: dr={dr} cr={cr}")
 
 
+# Parents before children, always — the server does not trust client ordering.
+_RANK = {
+    "financial_years": 10, "account_groups": 20, "accounts": 30, "items": 40, "godowns": 50,
+    "voucher_types": 60, "vouchers": 70, "voucher_entries": 80, "gst_tax_lines": 90,
+    "stock_ledger_entries": 100,
+}
+
+
+def _ordered(changes):
+    """Stable sort by table rank; account groups sorted parent-first (depth)."""
+    parent = {}
+    for c in changes:
+        if c.table == "account_groups":
+            parent[c.uuid] = c.payload.get("parent_uuid")
+
+    def depth(u):
+        d, seen = 0, set()
+        while parent.get(u) and parent[u] in parent and parent[u] not in seen:
+            seen.add(u)
+            u = parent[u]
+            d += 1
+        return d
+
+    deletes_last = lambda c: 1 if c.op == "delete" and c.table in ("vouchers", "voucher_entries", "gst_tax_lines", "stock_ledger_entries") else 0
+    return sorted(
+        changes,
+        key=lambda c: (_RANK.get(c.table, 1000), depth(c.uuid) if c.table == "account_groups" else 0, deletes_last(c)),
+    )
+
+
 @router.post("/push")
 async def push(
     req: PushRequest, company_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)
@@ -177,7 +209,7 @@ async def push(
     touched_voucher_ids: set[int] = set()
 
     try:
-        for change in req.changes:
+        for change in _ordered(req.changes):
             model = _TABLE_MODELS.get(change.table)
             if not model or change.table == "companies":  # company is created via POST /companies
                 skipped += 1
@@ -194,7 +226,8 @@ async def push(
                 if uuid_key in payload:
                     payload[fk_col] = _id_of(db, fk_model, payload.pop(uuid_key))
 
-            payload = {k: v for k, v in payload.items() if hasattr(model, k) and k != "id"}
+            payload = {k: v for k, v in payload.items() if hasattr(model, k) and k not in ("id", "uuid")}
+            payload["uuid"] = change.uuid  # client uuid IS the identity; without this FK lookups by uuid fail
             if hasattr(model, "company_id"):
                 payload["company_id"] = company_id  # tenant comes from the URL/membership, never the client
             payload = _coerce_datetimes(_coerce_decimals(payload))
@@ -211,7 +244,8 @@ async def push(
                     skipped += 1
                     continue
                 for k, v in payload.items():
-                    setattr(existing, k, v)
+                    if k != "uuid":
+                        setattr(existing, k, v)
                 applied += 1
                 target = existing
             else:
@@ -241,6 +275,15 @@ async def push(
             operation_id=req.operation_id, company_id=company_id, device_id=req.device_id, result=result,
         ))
         db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except (ValueError, UnbalancedVoucherError) as e:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=f"Sync rejected: {e}")
+    except IntegrityError as e:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"Sync conflict: {str(e.orig).splitlines()[0]}")
     except Exception:
         db.rollback()
         raise
@@ -282,6 +325,28 @@ def pull(
     ]
     next_cursor = rows[-1].id if rows else cursor
     return {"changes": changes, "next_cursor": next_cursor, "has_more": len(rows) == limit}
+
+
+@router.get("/status")
+def status(
+    company_id: int = Query(...),
+    cursor: int = Query(0, ge=0),
+    device_id: str = Query(""),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """How many changes made by OTHER devices are waiting to be pulled (badge count)."""
+    require_company_access(company_id, db, user)
+    n = (
+        db.query(func.count(transactions.SyncChange.id))
+        .filter(
+            transactions.SyncChange.company_id == company_id,
+            transactions.SyncChange.id > cursor,
+            transactions.SyncChange.device_id != device_id,
+        )
+        .scalar()
+    )
+    return {"pending_pull": int(n or 0)}
 
 
 @router.get("/pull-table", deprecated=True)
