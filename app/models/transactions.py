@@ -75,6 +75,190 @@ class StockLedgerEntry(Base, SyncMixin):
     qty_out: Mapped[Decimal] = mapped_column(Numeric(18, 3), default=Decimal("0"))
     rate: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0"))
 
+class Bill(Base, SyncMixin):
+    """
+    Bill-wise outstanding record.
+
+    Accounting truth remains voucher_entries.
+    This table is only for invoice/bill tracking.
+    """
+
+    __tablename__ = "bills"
+
+    __table_args__ = (
+        CheckConstraint(
+            "side IN ('dr', 'cr')",
+            name="ck_bills_side",
+        ),
+        CheckConstraint(
+            "original >= 0",
+            name="ck_bills_original_nonneg",
+        ),
+        CheckConstraint(
+            "outstanding >= 0",
+            name="ck_bills_outstanding_nonneg",
+        ),
+        CheckConstraint(
+            "outstanding <= original",
+            name="ck_bills_outstanding_le_original",
+        ),
+        CheckConstraint(
+            "status IN ('open', 'part', 'paid')",
+            name="ck_bills_status",
+        ),
+        Index(
+            "ix_bills_company_party",
+            "company_id",
+            "party_id",
+        ),
+        Index(
+            "ix_bills_company_due_date",
+            "company_id",
+            "due_date",
+        ),
+        Index(
+            "ix_bills_company_status",
+            "company_id",
+            "status",
+        ),
+        Index(
+            "ix_bills_company_voucher",
+            "company_id",
+            "voucher_id",
+        ),
+    )
+
+    company_id: Mapped[int] = mapped_column(
+        ForeignKey("companies.id"),
+        index=True,
+    )
+
+    # NULL for opening-balance bills.
+    voucher_id: Mapped[int | None] = mapped_column(
+        ForeignKey("vouchers.id"),
+        nullable=True,
+        index=True,
+    )
+
+    party_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id"),
+        index=True,
+    )
+
+    party_name: Mapped[str] = mapped_column(
+        String(255),
+    )
+
+    # dr = customer receivable / supplier advance
+    # cr = supplier payable / customer advance
+    side: Mapped[str] = mapped_column(
+        String(2),
+    )
+
+    bill_no: Mapped[str] = mapped_column(
+        String(128),
+    )
+
+    bill_date: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        index=True,
+    )
+
+    due_date: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+
+    original: Mapped[Decimal] = mapped_column(
+        Numeric(18, 2),
+        default=Decimal("0.00"),
+    )
+
+    outstanding: Mapped[Decimal] = mapped_column(
+        Numeric(18, 2),
+        default=Decimal("0.00"),
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(8),
+        default="open",
+    )
+
+
+class BillAllocation(Base, SyncMixin):
+    """
+    Links a receipt/payment/advance to a bill.
+
+    The source voucher is optional because an opening-balance
+    allocation can use source_voucher_uuid = ob_<account_uuid>.
+    """
+
+    __tablename__ = "bill_allocations"
+
+    __table_args__ = (
+        CheckConstraint(
+            "amount > 0",
+            name="ck_bill_allocations_amount_positive",
+        ),
+        Index(
+            "ix_bill_allocations_company_bill",
+            "company_id",
+            "bill_id",
+        ),
+        Index(
+            "ix_bill_allocations_company_party",
+            "company_id",
+            "party_id",
+        ),
+        Index(
+            "ix_bill_allocations_company_source",
+            "company_id",
+            "source_voucher_id",
+        ),
+    )
+
+    company_id: Mapped[int] = mapped_column(
+        ForeignKey("companies.id"),
+        index=True,
+    )
+
+    # NULL for an opening-balance source.
+    source_voucher_id: Mapped[int | None] = mapped_column(
+        ForeignKey("vouchers.id"),
+        nullable=True,
+        index=True,
+    )
+
+    bill_id: Mapped[int] = mapped_column(
+        ForeignKey("bills.id"),
+        index=True,
+    )
+
+    party_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id"),
+        index=True,
+    )
+
+    amount: Mapped[Decimal] = mapped_column(
+        Numeric(18, 2),
+    )
+
+    alloc_date: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        index=True,
+    )
+
+    # For opening-balance allocation:
+    # ob_<account_uuid>
+    #
+    # For normal payment/receipt:
+    # UUID of the source voucher.
+    source_voucher_uuid: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+        index=True,
+    )
 
 class SyncChange(Base, SyncMixin):
     """Append-only, server-authoritative change log. `id` (from SyncMixin,
